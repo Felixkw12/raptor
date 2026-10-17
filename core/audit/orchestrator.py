@@ -940,6 +940,8 @@ class OrchestratorConfig:
     # function loop, and fold tier-2 edge contracts into caller
     # reviews. Default off.
     edges: bool = False
+    open_discovery: bool = False
+    discovery_budget_fraction: float = 0.20
     # Mid-run journal checkpoint (core.coverage.journal_checkpoint):
     # when the journal's largest shard crosses the retained-size
     # trigger, quiesce the review workers and compact (dedup +
@@ -1289,6 +1291,7 @@ class ReviewOutcome:
     # entries mid-loop — an index window rescans shifted items
     # (duplicate non-memoized tool dispatch) or skips fresh ones.
     _incr_ticked: bool = field(default=False, repr=False, compare=False)
+    weaknesses: list[dict[str, Any]] | None = None
 
     _CONFIRMED_EVIDENCE = frozenset({
         "dark_verify:confirmed", "dynamic:crash", "frida:runtime",
@@ -10446,6 +10449,189 @@ def _run_audit_body(
                     plf_func,
                     exc_info=True,
                 )
+
+    # --- Cross-scope contract discovery (--open-discovery) ---
+    if config.open_discovery:
+        try:
+            from .discovery import (
+                build_seam_bundles,
+                build_state_machine_bundles,
+                build_sweep_targets,
+                detect_single_threaded,
+                run_assumption_mining,
+                run_contract_discovery,
+                run_state_machine_discovery,
+                write_discovery_weaknesses,
+            )
+
+            _disc_entry_points: set[str] = set()
+            if context_map:
+                _disc_entry_points = entry_points
+
+            _disc_weakness_fids: set[str] = set()
+            try:
+                from .composition import build_weakness_inventory
+                _disc_inv = build_weakness_inventory(config.out_dir)
+                _disc_weakness_fids = {w.fid for w in _disc_inv}
+            except Exception:
+                pass
+
+            _disc_run_id = _resolved_run_id(config.out_dir)
+            _disc_bundles = build_seam_bundles(
+                checklist,
+                context_map,
+                _disc_entry_points,
+                target_path=config.target_path,
+                weakness_fids=_disc_weakness_fids,
+            )
+            if _disc_bundles:
+                _disc_budget = (
+                    (config.max_cost_usd or 50.0)
+                    * config.discovery_budget_fraction
+                )
+
+                _disc_client = _run_llm_client(config)
+
+                def _disc_review_fn(
+                    system: str, prompt: str,
+                ) -> tuple[str, float]:
+                    resp = _disc_client.generate(
+                        prompt, system_prompt=system,
+                    )
+                    return resp.content, resp.cost
+
+                _disc_results = run_contract_discovery(
+                    _disc_bundles,
+                    review_fn=_disc_review_fn,
+                    max_cost_usd=_disc_budget,
+                )
+                _disc_total_w = 0
+                for dr in _disc_results:
+                    callee_fid = dr.seam_or_field.split("->")[-1].strip()
+                    if callee_fid and dr.weaknesses:
+                        write_discovery_weaknesses(
+                            config.out_dir,
+                            callee_fid,
+                            dr.weaknesses,
+                            run_id=_disc_run_id,
+                            cost_usd=dr.cost_usd,
+                        )
+                        _disc_total_w += len(dr.weaknesses)
+                if _disc_total_w:
+                    logger.info(
+                        "open discovery: %d contract weaknesses from "
+                        "%d seams",
+                        _disc_total_w, len(_disc_results),
+                    )
+
+            # state machine discovery
+            _fc_path = config.out_dir / "field-census.json"
+            if _fc_path.exists():
+                _fc = json.loads(
+                    _fc_path.read_text()  # raw-open: RAPTOR run-dir artifact, not target source
+                )
+                _sm_bundles = build_state_machine_bundles(
+                    _fc,
+                    target_path=config.target_path,
+                )
+                if _sm_bundles:
+                    _sm_budget = (
+                        (config.max_cost_usd or 50.0)
+                        * config.discovery_budget_fraction
+                        * 0.3
+                    )
+                    if not _disc_bundles:
+                        _sm_budget = (
+                            (config.max_cost_usd or 50.0)
+                            * config.discovery_budget_fraction
+                        )
+
+                    _sm_st = detect_single_threaded(config.target_path)
+                    _sm_client = _run_llm_client(config)
+
+                    def _sm_review_fn(
+                        system: str, prompt: str,
+                    ) -> tuple[str, float]:
+                        resp = _sm_client.generate(
+                            prompt, system_prompt=system,
+                        )
+                        return resp.content, resp.cost
+
+                    _sm_results = run_state_machine_discovery(
+                        _sm_bundles,
+                        review_fn=_sm_review_fn,
+                        max_cost_usd=_sm_budget,
+                        single_threaded=_sm_st,
+                    )
+                    _sm_total_w = 0
+                    for sr in _sm_results:
+                        if sr.weaknesses:
+                            write_discovery_weaknesses(
+                                config.out_dir,
+                                sr.seam_or_field,
+                                sr.weaknesses,
+                                run_id=_disc_run_id,
+                                cost_usd=sr.cost_usd,
+                            )
+                            _sm_total_w += len(sr.weaknesses)
+                    if _sm_total_w:
+                        logger.info(
+                            "open discovery: %d state machine weaknesses "
+                            "from %d fields",
+                            _sm_total_w, len(_sm_results),
+                        )
+
+            # Assumption mining on high-priority targets
+            _mining_targets = build_sweep_targets(
+                checklist,
+                context_map,
+                _disc_entry_points,
+                target_path=config.target_path,
+                weakness_fids=_disc_weakness_fids,
+            )
+            if _mining_targets:
+                _mining_budget = (
+                    (config.max_cost_usd or 50.0)
+                    * config.discovery_budget_fraction
+                    * 0.15
+                )
+
+                _mining_client = _run_llm_client(config)
+
+                def _mining_review_fn(
+                    system: str, prompt: str,
+                ) -> tuple[str, float]:
+                    resp = _mining_client.generate(
+                        prompt, system_prompt=system,
+                    )
+                    return resp.content, resp.cost
+
+                _mining_results = run_assumption_mining(
+                    _mining_targets,
+                    review_fn=_mining_review_fn,
+                    max_cost_usd=_mining_budget,
+                )
+                _mining_total_w = 0
+                for mr in _mining_results:
+                    if mr.weaknesses:
+                        write_discovery_weaknesses(
+                            config.out_dir,
+                            mr.seam_or_field,
+                            mr.weaknesses,
+                            run_id=_disc_run_id,
+                            cost_usd=mr.cost_usd,
+                        )
+                        _mining_total_w += len(mr.weaknesses)
+                if _mining_total_w:
+                    logger.info(
+                        "open discovery: %d assumption mining weaknesses "
+                        "from %d targets",
+                        _mining_total_w, len(_mining_results),
+                    )
+        except Exception:
+            logger.warning(
+                "open discovery failed", exc_info=True,
+            )
 
     # --- Structural-receipt rescue composition (post-loop) ---
     #
@@ -23348,11 +23534,19 @@ def _proactive_validate(
         try:
             from .cross_function_verify import cross_function_verify
             ran.add("cross_function")
+            _xf_parts = []
+            for _h in getattr(outcome, "hypotheses", None) or []:
+                if _refutation_scope_cross_function(_h):
+                    _c = (_h.get("counter") or "").strip()
+                    if _c:
+                        _xf_parts.append(_c)
+            _xf_counter = "\n".join(_xf_parts)
             xf_result = cross_function_verify(
                 function_name=outcome.function,
                 file_path=outcome.file,
                 hypothesis=outcome.hypothesis or "",
                 server=joern_server,
+                counter=_xf_counter,
             )
             if xf_result is None:
                 # Inconclusive — no verifier decided anything.

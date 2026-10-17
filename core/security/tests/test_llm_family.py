@@ -36,6 +36,11 @@ def test_bare_model_id_peels_aggregator_then_provider():
     assert bare_model_id("opper/anthropic/claude-sonnet-4-6") == "claude-sonnet-4-6"
     assert bare_model_id("orcarouter/openai/gpt-5") == "gpt-5"
     assert bare_model_id("together/anthropic/claude-haiku-4-5") == "claude-haiku-4-5"
+    assert bare_model_id("yapi/anthropic/claude-haiku-4-5") == "claude-haiku-4-5"
+    # ``yapi/deepseek/deepseek-v4-flash`` — the relay is addressed by the
+    # vendor-qualified id, so only the route prefix peels and the inner
+    # ``deepseek/`` segment has to survive.
+    assert bare_model_id("yapi/deepseek/deepseek-v4-flash") == "deepseek/deepseek-v4-flash"
 
 
 def test_bare_model_id_leaves_unknown_prefixes_alone():

@@ -2644,6 +2644,7 @@ _AGGREGATOR_PATH_PREFIXES = {
     "/perplexity/":   "perplexity",
     "/replicate/":    "replicate",
     "/together/":     "together",
+    "/yapi/":         "yapi",
 }
 
 _CLOUD_PATH_PREFIXES = {

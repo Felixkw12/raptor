@@ -979,11 +979,17 @@ class RaptorConfig:
         "DOCKER_HOST",         # Docker daemon socket. An attacker URL lets
                                # a sandboxed child push images / run
                                # containers against a forged API.
+        # RAPTOR-internal sandbox marker — not code-exec, but a
+        # forged marker steers egress routing to a different loopback
+        # service if the pop-before-add gate in _macos_spawn is
+        # bypassed by a future code path.
+        "_RAPTOR_SEATBELT_EGRESS_PROXY",
         # TLS trust weakening. Not code-exec on their own but let an MITM
         # position actually intercept our traffic (e.g. if a child does
         # the TLS and the attacker planted a CA cert).
         "REQUESTS_CA_BUNDLE",  # Python `requests` trust anchor override.
         "CURL_CA_BUNDLE",      # curl trust anchor override.
+        "NIX_SSL_CERT_FILE",   # Nix/OCaml trust anchor override.
         "SSL_CERT_FILE",       # OpenSSL-based tools' trust anchor override.
         "SSL_CERT_DIR",        # OpenSSL-based tools' trust anchor dir.
         # Allocator config — jemalloc honours these env vars. They can
@@ -1285,6 +1291,7 @@ class RaptorConfig:
         "PERPLEXITY_API_KEY",
         "REPLICATE_API_TOKEN",  # uses _TOKEN suffix
         "TOGETHER_API_KEY",
+        "YAPI_API_KEY",
     )
 
     # Cloud gateway keys (Bedrock, Vertex AI, Azure OpenAI).
